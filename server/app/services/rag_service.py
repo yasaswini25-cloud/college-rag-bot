@@ -1,5 +1,12 @@
 import time
-from typing import List, Dict, Any, Optional, AsyncGenerator
+
+from typing import (
+    List,
+    Dict,
+    Any,
+    Optional,
+    AsyncGenerator
+)
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +17,24 @@ from app.config.settings import settings
 
 
 class RAGService:
+    """
+    Main Retrieval-Augmented Generation service.
+
+    Pipeline:
+
+        User Question
+              ↓
+        Vector Retrieval
+              ↓
+        Candidate Pool
+              ↓
+        Strict Hybrid Reranking
+              ↓
+        Relevant Top-K
+              ↓
+        Grounded LLM Generation
+    """
+
     def __init__(self):
         self.retriever = VectorRetriever()
         self.generator = LLMGenerator()
@@ -26,22 +51,22 @@ class RAGService:
 
         start_time = time.time()
 
+        final_k = top_k or settings.TOP_K
+
         # ---------------------------------------------------------
         # 1. Retrieve candidate chunks
         # ---------------------------------------------------------
 
-        final_top_k = top_k or settings.TOP_K
-
         retrieved_chunks = await self.retriever.retrieve(
             db=db,
             query=question,
-            top_k=final_top_k,
+            top_k=final_k,
             category=category,
             department=department
         )
 
         # ---------------------------------------------------------
-        # 2. Apply hybrid re-ranking
+        # 2. Strict hybrid reranking
         # ---------------------------------------------------------
 
         if settings.HYBRID_SEARCH and retrieved_chunks:
@@ -49,7 +74,7 @@ class RAGService:
             retrieved_chunks = HybridReranker.rerank(
                 query=question,
                 retrieved_chunks=retrieved_chunks,
-                top_k=final_top_k
+                final_k=final_k
             )
 
         # ---------------------------------------------------------
@@ -67,11 +92,28 @@ class RAGService:
         )
 
         return {
-            "answer": gen_result.get("answer"),
-            "sources": gen_result.get("sources", []),
+            "answer": gen_result.get(
+                "answer",
+                ""
+            ),
+
+            "sources": gen_result.get(
+                "sources",
+                []
+            ),
+
             "retrieved_chunks": retrieved_chunks,
-            "grounded": gen_result.get("grounded", False),
-            "model": gen_result.get("model", "local"),
+
+            "grounded": gen_result.get(
+                "grounded",
+                False
+            ),
+
+            "model": gen_result.get(
+                "model",
+                "local"
+            ),
+
             "latency_ms": latency_ms
         }
 
@@ -85,22 +127,22 @@ class RAGService:
         top_k: int = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
 
-        # ---------------------------------------------------------
-        # 1. Retrieve candidate chunks
-        # ---------------------------------------------------------
+        final_k = top_k or settings.TOP_K
 
-        final_top_k = top_k or settings.TOP_K
+        # ---------------------------------------------------------
+        # 1. Retrieve candidates
+        # ---------------------------------------------------------
 
         retrieved_chunks = await self.retriever.retrieve(
             db=db,
             query=question,
-            top_k=final_top_k,
+            top_k=final_k,
             category=category,
             department=department
         )
 
         # ---------------------------------------------------------
-        # 2. Apply hybrid re-ranking
+        # 2. Strict reranking
         # ---------------------------------------------------------
 
         if settings.HYBRID_SEARCH and retrieved_chunks:
@@ -108,7 +150,7 @@ class RAGService:
             retrieved_chunks = HybridReranker.rerank(
                 query=question,
                 retrieved_chunks=retrieved_chunks,
-                top_k=final_top_k
+                final_k=final_k
             )
 
         # ---------------------------------------------------------
