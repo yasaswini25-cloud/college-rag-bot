@@ -1,5 +1,4 @@
 import re
-
 from typing import List, Dict, Any
 
 from app.rag.embeddings import STOPWORDS
@@ -13,7 +12,7 @@ class HybridReranker:
     3. Document title relevance
 
     The retriever provides a larger candidate pool.
-    This class produces the final ranking.
+    This class produces the final Top-K ranking.
     """
 
     @staticmethod
@@ -21,7 +20,8 @@ class HybridReranker:
         query: str,
         retrieved_chunks: List[Dict[str, Any]],
         semantic_weight: float = 0.7,
-        keyword_weight: float = 0.3
+        keyword_weight: float = 0.3,
+        top_k: int = 5
     ) -> List[Dict[str, Any]]:
 
         if not retrieved_chunks:
@@ -41,8 +41,10 @@ class HybridReranker:
             and term not in STOPWORDS
         }
 
+        # If no meaningful query terms exist,
+        # simply return the requested number of chunks.
         if not query_terms:
-            return retrieved_chunks
+            return retrieved_chunks[:top_k]
 
         reranked = []
 
@@ -120,7 +122,7 @@ class HybridReranker:
             )
 
             # -----------------------------------------------------
-            # Final reranking score
+            # Final hybrid score
             # -----------------------------------------------------
 
             hybrid_score = (
@@ -163,4 +165,4 @@ class HybridReranker:
         # 4. Return final Top-K
         # ---------------------------------------------------------
 
-        return reranked
+        return reranked[:top_k]
