@@ -1,5 +1,4 @@
 import re
-
 import numpy as np
 
 from typing import List, Dict, Any, Optional
@@ -15,8 +14,13 @@ from app.config.settings import settings
 
 class VectorRetriever:
     """
-    Retrieves top-K relevant chunks using hybrid vector cosine similarity
-    and keyword scoring.
+    Hybrid document retriever.
+
+    Performs:
+    1. Semantic retrieval using embedding cosine similarity.
+    2. Lexical keyword matching.
+    3. Hybrid scoring.
+    4. Returns a larger candidate pool for downstream reranking.
     """
 
     def __init__(
@@ -38,7 +42,15 @@ class VectorRetriever:
         similarity_threshold: Optional[float] = None
     ) -> List[Dict[str, Any]]:
 
-        top_k = top_k or settings.TOP_K
+        # ---------------------------------------------------------
+        # 1. Retrieval configuration
+        # ---------------------------------------------------------
+
+        final_k = top_k or settings.TOP_K
+
+        # Retrieve more candidates initially.
+        # The reranker will later reduce this to the final Top-K.
+        candidate_k = max(final_k * 3, 15)
 
         threshold = (
             similarity_threshold
@@ -47,7 +59,7 @@ class VectorRetriever:
         )
 
         # ---------------------------------------------------------
-        # 1. Generate query embedding
+        # 2. Generate query embedding
         # ---------------------------------------------------------
 
         query_vector = await self.embedder.get_embedding(query)
@@ -59,22 +71,27 @@ class VectorRetriever:
 
         q_norm = np.linalg.norm(q_vec)
 
+        if q_norm == 0:
+            return []
+
         # ---------------------------------------------------------
-        # 2. Extract meaningful query terms
+        # 3. Extract meaningful query terms
         # ---------------------------------------------------------
 
         query_terms = [
             word
             for word in re.findall(
-                r"\w+",
+                r"\b\w+\b",
                 query.lower()
             )
             if len(word) > 2
             and word not in STOPWORDS
         ]
 
+        query_term_set = set(query_terms)
+
         # ---------------------------------------------------------
-        # 3. Fetch indexed chunks with document metadata
+        # 4. Fetch indexed document chunks
         # ---------------------------------------------------------
 
         stmt = (
@@ -105,14 +122,13 @@ class VectorRetriever:
             )
 
         result = await db.execute(stmt)
-
         rows = result.all()
 
         if not rows:
             return []
 
         # ---------------------------------------------------------
-        # 4. Calculate similarity and keyword scores
+        # 5. Score every chunk
         # ---------------------------------------------------------
 
         scored_chunks = []
@@ -131,110 +147,127 @@ class VectorRetriever:
 
             c_norm = np.linalg.norm(c_vec)
 
-            if c_norm == 0 or q_norm == 0:
+            if c_norm == 0:
                 continue
 
-            # Cosine similarity
+            # -----------------------------------------------------
+            # Semantic similarity
+            # -----------------------------------------------------
+
             similarity = float(
                 np.dot(q_vec, c_vec)
                 / (q_norm * c_norm)
             )
 
             # -----------------------------------------------------
-            # Keyword matching
+            # Token-based keyword matching
             # -----------------------------------------------------
 
-            content_lower = (
-                chunk.content or ""
-            ).lower()
+            content = chunk.content or ""
+            title = doc.title or doc.filename or ""
 
-            title_lower = (
-                doc.title or ""
-            ).lower()
-
-            kw_matches = sum(
-                1
-                for term in query_terms
-                if (
-                    term in content_lower
-                    or term in title_lower
+            content_terms = set(
+                re.findall(
+                    r"\b\w+\b",
+                    content.lower()
                 )
             )
 
-            kw_score = (
-                kw_matches
-                / max(len(query_terms), 1)
-                if query_terms
-                else 0.0
+            title_terms = set(
+                re.findall(
+                    r"\b\w+\b",
+                    title.lower()
+                )
+            )
+
+            content_matches = (
+                query_term_set & content_terms
+            )
+
+            title_matches = (
+                query_term_set & title_terms
+            )
+
+            # Content matches have normal weight.
+            # Title matches receive additional importance.
+            keyword_score = (
+                len(content_matches)
+                + (1.5 * len(title_matches))
+            ) / max(
+                len(query_term_set),
+                1
+            )
+
+            keyword_score = min(
+                keyword_score,
+                1.0
             )
 
             # -----------------------------------------------------
-            # Combined hybrid score
+            # Hybrid score
             # -----------------------------------------------------
 
             combined_score = (
                 0.65 * similarity
-                + 0.35 * kw_score
+                + 0.35 * keyword_score
             )
 
             # -----------------------------------------------------
-            # STRICT RETRIEVAL FILTER
-            #
-            # Previously:
-            # similarity >= threshold OR
-            # keyword fallback >= 0.20
-            #
-            # Now every chunk must meet the configured threshold.
+            # Retrieval threshold
             # -----------------------------------------------------
 
-            if combined_score >= threshold:
+            if combined_score < threshold:
+                continue
 
-                scored_chunks.append(
-                    {
-                        "chunk_id": chunk.id,
+            scored_chunks.append(
+                {
+                    "chunk_id": chunk.id,
+                    "document_id": doc.id,
 
-                        "document_id": doc.id,
+                    "document_name": (
+                        doc.title
+                        or doc.filename
+                    ),
 
-                        "document_name": (
-                            doc.title
-                            or doc.filename
-                        ),
+                    "filename": doc.filename,
 
-                        "filename": doc.filename,
+                    "category": doc.category,
+                    "department": doc.department,
+                    "version": doc.version,
 
-                        "category": doc.category,
+                    "page_number": chunk.page_number,
+                    "chunk_index": chunk.chunk_index,
 
-                        "department": doc.department,
+                    "content": chunk.content,
 
-                        "version": doc.version,
+                    "similarity_score": round(
+                        combined_score,
+                        4
+                    ),
 
-                        "page_number": chunk.page_number,
+                    "raw_cosine": round(
+                        similarity,
+                        4
+                    ),
 
-                        "chunk_index": chunk.chunk_index,
+                    "keyword_score": round(
+                        keyword_score,
+                        4
+                    ),
 
-                        "content": chunk.content,
+                    "kw_matches": len(
+                        content_matches
+                    ),
 
-                        "similarity_score": round(
-                            combined_score,
-                            4
-                        ),
-
-                        "raw_cosine": round(
-                            similarity,
-                            4
-                        ),
-
-                        "kw_matches": kw_matches,
-
-                        "metadata": (
-                            chunk.to_dict()
-                            .get("metadata", {})
-                        )
-                    }
-                )
+                    "metadata": (
+                        chunk.to_dict()
+                        .get("metadata", {})
+                    )
+                }
+            )
 
         # ---------------------------------------------------------
-        # 5. Sort by combined score
+        # 6. Sort by initial retrieval score
         # ---------------------------------------------------------
 
         scored_chunks.sort(
@@ -243,7 +276,11 @@ class VectorRetriever:
         )
 
         # ---------------------------------------------------------
-        # 6. Return top-K results
+        # 7. Return candidate pool
+        #
+        # IMPORTANT:
+        # Do NOT immediately return final Top-K.
+        # Give the reranker a larger candidate pool.
         # ---------------------------------------------------------
 
-        return scored_chunks[:top_k]
+        return scored_chunks[:candidate_k]
