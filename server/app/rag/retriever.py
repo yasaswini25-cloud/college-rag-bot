@@ -4,7 +4,7 @@ import numpy as np
 from typing import List, Dict, Any, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, and_
 
 from app.models.chunk import DocumentChunk
 from app.models.document import Document
@@ -16,11 +16,20 @@ class VectorRetriever:
     """
     Hybrid document retriever.
 
-    Performs:
+    Pipeline:
     1. Semantic retrieval using embedding cosine similarity.
     2. Lexical keyword matching.
     3. Hybrid scoring.
-    4. Returns a larger candidate pool for downstream reranking.
+    4. Candidate retrieval.
+    5. Neighbor-chunk expansion for contextual continuity.
+
+    Neighbor expansion is especially useful for:
+    - lists
+    - tables
+    - multi-sentence answers
+    - sections split across chunk boundaries
+    - admission requirements
+    - procedures and eligibility criteria
     """
 
     def __init__(
@@ -48,8 +57,7 @@ class VectorRetriever:
 
         final_k = top_k or settings.TOP_K
 
-        # Retrieve more candidates initially.
-        # The reranker will later reduce this to the final Top-K.
+        # Retrieve a larger candidate pool first.
         candidate_k = max(final_k * 3, 15)
 
         threshold = (
@@ -57,6 +65,9 @@ class VectorRetriever:
             if similarity_threshold is not None
             else settings.SIMILARITY_THRESHOLD
         )
+
+        # Number of neighboring chunks to add around strong matches.
+        neighbor_window = 1
 
         # ---------------------------------------------------------
         # 2. Generate query embedding
@@ -105,7 +116,6 @@ class VectorRetriever:
             )
         )
 
-        # Optional category filtering
         if category and category.lower() != "all":
             stmt = stmt.where(
                 Document.category.ilike(
@@ -113,7 +123,6 @@ class VectorRetriever:
                 )
             )
 
-        # Optional department filtering
         if department and department.lower() != "all":
             stmt = stmt.where(
                 Document.department.ilike(
@@ -160,11 +169,16 @@ class VectorRetriever:
             )
 
             # -----------------------------------------------------
-            # Token-based keyword matching
+            # Keyword matching
             # -----------------------------------------------------
 
             content = chunk.content or ""
-            title = doc.title or doc.filename or ""
+
+            title = (
+                doc.title
+                or doc.filename
+                or ""
+            )
 
             content_terms = set(
                 re.findall(
@@ -188,8 +202,6 @@ class VectorRetriever:
                 query_term_set & title_terms
             )
 
-            # Content matches have normal weight.
-            # Title matches receive additional importance.
             keyword_score = (
                 len(content_matches)
                 + (1.5 * len(title_matches))
@@ -213,7 +225,7 @@ class VectorRetriever:
             )
 
             # -----------------------------------------------------
-            # Retrieval threshold
+            # Threshold
             # -----------------------------------------------------
 
             if combined_score < threshold:
@@ -222,6 +234,7 @@ class VectorRetriever:
             scored_chunks.append(
                 {
                     "chunk_id": chunk.id,
+
                     "document_id": doc.id,
 
                     "document_name": (
@@ -232,10 +245,13 @@ class VectorRetriever:
                     "filename": doc.filename,
 
                     "category": doc.category,
+
                     "department": doc.department,
+
                     "version": doc.version,
 
                     "page_number": chunk.page_number,
+
                     "chunk_index": chunk.chunk_index,
 
                     "content": chunk.content,
@@ -262,12 +278,15 @@ class VectorRetriever:
                     "metadata": (
                         chunk.to_dict()
                         .get("metadata", {})
-                    )
+                    ),
+
+                    # This is a direct retrieval result.
+                    "expanded": False
                 }
             )
 
         # ---------------------------------------------------------
-        # 6. Sort by initial retrieval score
+        # 6. Sort initial candidates
         # ---------------------------------------------------------
 
         scored_chunks.sort(
@@ -275,12 +294,180 @@ class VectorRetriever:
             reverse=True
         )
 
+        # Keep a larger pool for expansion.
+        initial_candidates = scored_chunks[:candidate_k]
+
+        if not initial_candidates:
+            return []
+
         # ---------------------------------------------------------
-        # 7. Return candidate pool
+        # 7. Select strong anchor chunks
+        # ---------------------------------------------------------
         #
-        # IMPORTANT:
-        # Do NOT immediately return final Top-K.
-        # Give the reranker a larger candidate pool.
+        # We don't expand every candidate.
+        #
+        # Instead, expand the strongest results so unrelated
+        # documents do not flood the context.
         # ---------------------------------------------------------
 
-        return scored_chunks[:candidate_k]
+        anchor_count = min(
+            max(final_k, 3),
+            len(initial_candidates)
+        )
+
+        anchors = initial_candidates[:anchor_count]
+
+        # ---------------------------------------------------------
+        # 8. Retrieve neighboring chunks
+        # ---------------------------------------------------------
+
+        expanded_chunks = {}
+
+        # Add all original candidates first.
+        for item in initial_candidates:
+            expanded_chunks[item["chunk_id"]] = item
+
+        for anchor in anchors:
+
+            document_id = anchor["document_id"]
+            anchor_index = anchor["chunk_index"]
+
+            start_index = max(
+                0,
+                anchor_index - neighbor_window
+            )
+
+            end_index = (
+                anchor_index
+                + neighbor_window
+            )
+
+            neighbor_stmt = (
+                select(
+                    DocumentChunk,
+                    Document
+                )
+                .join(
+                    Document,
+                    DocumentChunk.document_id
+                    == Document.id
+                )
+                .where(
+                    and_(
+                        DocumentChunk.document_id
+                        == document_id,
+
+                        DocumentChunk.chunk_index
+                        >= start_index,
+
+                        DocumentChunk.chunk_index
+                        <= end_index,
+
+                        Document.status
+                        == "INDEXED"
+                    )
+                )
+            )
+
+            neighbor_result = await db.execute(
+                neighbor_stmt
+            )
+
+            neighbor_rows = neighbor_result.all()
+
+            for neighbor_chunk, neighbor_doc in neighbor_rows:
+
+                # Already retrieved normally.
+                if neighbor_chunk.id in expanded_chunks:
+                    continue
+
+                neighbor_content = (
+                    neighbor_chunk.content
+                    or ""
+                )
+
+                if not neighbor_content.strip():
+                    continue
+
+                # -------------------------------------------------
+                # Important:
+                # Neighbor chunks are NOT treated as equally
+                # relevant semantic matches.
+                #
+                # They are contextual expansions.
+                # -------------------------------------------------
+
+                expanded_chunks[
+                    neighbor_chunk.id
+                ] = {
+                    "chunk_id": neighbor_chunk.id,
+
+                    "document_id": neighbor_doc.id,
+
+                    "document_name": (
+                        neighbor_doc.title
+                        or neighbor_doc.filename
+                    ),
+
+                    "filename": neighbor_doc.filename,
+
+                    "category": neighbor_doc.category,
+
+                    "department": neighbor_doc.department,
+
+                    "version": neighbor_doc.version,
+
+                    "page_number": neighbor_chunk.page_number,
+
+                    "chunk_index": neighbor_chunk.chunk_index,
+
+                    "content": neighbor_content,
+
+                    # Give neighboring chunks a lower score
+                    # so they don't outrank directly relevant
+                    # chunks.
+                    "similarity_score": 0.0,
+
+                    "raw_cosine": 0.0,
+
+                    "keyword_score": 0.0,
+
+                    "kw_matches": 0,
+
+                    "metadata": (
+                        neighbor_chunk.to_dict()
+                        .get("metadata", {})
+                    ),
+
+                    "expanded": True,
+
+                    "expanded_from_chunk": anchor_index
+                }
+
+        # ---------------------------------------------------------
+        # 9. Convert dictionary back to list
+        # ---------------------------------------------------------
+
+        all_chunks = list(
+            expanded_chunks.values()
+        )
+
+        # ---------------------------------------------------------
+        # 10. Sort by document + chunk order
+        #
+        # This is important because the LLM should see neighboring
+        # chunks in their natural document order.
+        # ---------------------------------------------------------
+
+        all_chunks.sort(
+            key=lambda x: (
+                str(x["document_id"]),
+                x["chunk_index"]
+            )
+        )
+
+        # ---------------------------------------------------------
+        # 11. Return expanded context
+        # ---------------------------------------------------------
+
+        return all_chunks
