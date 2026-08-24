@@ -10,12 +10,16 @@ class LLMGenerator:
     Generates answers from retrieved context using Gemini, OpenAI,
     or local synthesis fallback.
 
-    Includes a grounding gate to prevent the LLM from answering
-    when the retrieved context is not sufficiently relevant.
+    Includes:
+    1. Grounding gate
+    2. Final relevance filtering
+    3. Strict knowledge-base grounding
+    4. Source/citation filtering
     """
 
     def __init__(self, provider: str = None):
         self.provider = (provider or settings.LLM_PROVIDER).lower()
+
         self.gemini_key = settings.GEMINI_API_KEY
         self.openai_key = settings.OPENAI_API_KEY
 
@@ -25,6 +29,9 @@ class LLMGenerator:
             "GROUNDING_THRESHOLD",
             0.35
         )
+
+        # Minimum final relevance score.
+        self.relevance_threshold = 0.40
 
     # ---------------------------------------------------------
     # Grounding check
@@ -38,8 +45,7 @@ class LLMGenerator:
         Determines whether the retrieved context is strong enough
         to answer the question.
 
-        The retriever/reranker produces similarity scores. We use
-        the highest available score as the grounding signal.
+        Uses the strongest available retrieval/reranking score.
         """
 
         if not retrieved_chunks:
@@ -48,6 +54,7 @@ class LLMGenerator:
         scores = []
 
         for chunk in retrieved_chunks:
+
             score = chunk.get(
                 "hybrid_score",
                 chunk.get(
@@ -67,6 +74,209 @@ class LLMGenerator:
         best_score = max(scores)
 
         return best_score >= self.grounding_threshold
+
+    # ---------------------------------------------------------
+    # Final relevance filtering
+    # ---------------------------------------------------------
+
+    def _filter_relevant_chunks(
+        self,
+        query: str,
+        chunks: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Performs a final relevance check before context is sent
+        to the LLM.
+
+        This prevents semantically similar but unrelated pages
+        from appearing in the answer or citations.
+
+        Scoring:
+
+        65% semantic similarity
+        35% lexical keyword relevance
+
+        The strongest result is used as the reference point.
+        Other chunks must have sufficient relevance relative
+        to the strongest result.
+        """
+
+        if not chunks:
+            return []
+
+        # -----------------------------------------------------
+        # Extract query terms
+        # -----------------------------------------------------
+
+        query_terms = {
+            term
+            for term in re.findall(
+                r"\b\w+\b",
+                query.lower()
+            )
+            if len(term) > 2
+        }
+
+        if not query_terms:
+            return chunks[:1]
+
+        scored = []
+
+        # -----------------------------------------------------
+        # Score every chunk
+        # -----------------------------------------------------
+
+        for chunk in chunks:
+
+            content = (
+                chunk.get("content") or ""
+            ).lower()
+
+            title = (
+                chunk.get("document_name")
+                or chunk.get("filename")
+                or ""
+            ).lower()
+
+            # Tokenize content
+            content_terms = set(
+                re.findall(
+                    r"\b\w+\b",
+                    content
+                )
+            )
+
+            # Tokenize document title
+            title_terms = set(
+                re.findall(
+                    r"\b\w+\b",
+                    title
+                )
+            )
+
+            # -------------------------------------------------
+            # Keyword matching
+            # -------------------------------------------------
+
+            content_matches = (
+                query_terms & content_terms
+            )
+
+            title_matches = (
+                query_terms & title_terms
+            )
+
+            lexical_score = (
+                len(content_matches)
+                + (1.5 * len(title_matches))
+            ) / max(
+                len(query_terms),
+                1
+            )
+
+            lexical_score = min(
+                lexical_score,
+                1.0
+            )
+
+            # -------------------------------------------------
+            # Semantic score
+            # -------------------------------------------------
+
+            semantic_score = float(
+                chunk.get(
+                    "raw_cosine",
+                    chunk.get(
+                        "similarity_score",
+                        0.0
+                    )
+                )
+            )
+
+            # -------------------------------------------------
+            # Final relevance score
+            # -------------------------------------------------
+
+            final_score = (
+                0.65 * semantic_score
+                + 0.35 * lexical_score
+            )
+
+            updated_chunk = dict(chunk)
+
+            updated_chunk["final_relevance"] = round(
+                final_score,
+                4
+            )
+
+            updated_chunk["lexical_score"] = round(
+                lexical_score,
+                4
+            )
+
+            updated_chunk["query_matches"] = len(
+                content_matches
+            )
+
+            scored.append(updated_chunk)
+
+        # -----------------------------------------------------
+        # Sort strongest first
+        # -----------------------------------------------------
+
+        scored.sort(
+            key=lambda x: x["final_relevance"],
+            reverse=True
+        )
+
+        if not scored:
+            return []
+
+        # -----------------------------------------------------
+        # Find strongest result
+        # -----------------------------------------------------
+
+        best_chunk = scored[0]
+
+        best_score = float(
+            best_chunk["final_relevance"]
+        )
+
+        # If even the strongest result is weak,
+        # reject the entire retrieval.
+        if best_score < self.relevance_threshold:
+            return []
+
+        # -----------------------------------------------------
+        # Relative relevance filtering
+        # -----------------------------------------------------
+
+        # A chunk must be:
+        #
+        # 1. Above absolute relevance threshold
+        # 2. At least 70% as relevant as the strongest chunk
+        #
+        # This prevents unrelated pages from being included
+        # merely because they belong to the same document.
+
+        relative_threshold = best_score * 0.70
+
+        relevant_chunks = []
+
+        for chunk in scored:
+
+            score = float(
+                chunk["final_relevance"]
+            )
+
+            if (
+                score >= self.relevance_threshold
+                and score >= relative_threshold
+            ):
+                relevant_chunks.append(chunk)
+
+        # Keep maximum five final context chunks.
+        return relevant_chunks[:5]
 
     # ---------------------------------------------------------
     # Non-streaming generation
@@ -95,19 +305,40 @@ class LLMGenerator:
             }
 
         # -----------------------------------------------------
-        # 2. Grounding gate
+        # 2. Final relevance filtering
+        # -----------------------------------------------------
+
+        relevant_chunks = self._filter_relevant_chunks(
+            query,
+            retrieved_chunks
+        )
+
+        if not relevant_chunks:
+            return {
+                "answer": PromptBuilder.FALLBACK_UNKNOWN_MESSAGE,
+                "sources": [],
+                "model": "relevance-guardrail",
+                "grounded": False
+            }
+
+        # IMPORTANT:
+        # From this point onward ONLY relevant chunks are used.
+        retrieved_chunks = relevant_chunks
+
+        # -----------------------------------------------------
+        # 3. Grounding gate
         # -----------------------------------------------------
 
         if not self._is_grounded(retrieved_chunks):
             return {
                 "answer": PromptBuilder.FALLBACK_UNKNOWN_MESSAGE,
-                "sources": self._format_sources(retrieved_chunks),
+                "sources": [],
                 "model": "grounding-guardrail",
                 "grounded": False
             }
 
         # -----------------------------------------------------
-        # 3. Build grounded prompt
+        # 4. Build grounded prompt
         # -----------------------------------------------------
 
         prompt = PromptBuilder.build_rag_prompt(
@@ -116,16 +347,20 @@ class LLMGenerator:
             conversation_history
         )
 
-        sources = self._format_sources(retrieved_chunks)
+        # Sources are created AFTER filtering.
+        sources = self._format_sources(
+            retrieved_chunks
+        )
 
         # -----------------------------------------------------
-        # 4. Gemini
+        # 5. Gemini
         # -----------------------------------------------------
 
         if self.gemini_key and (
             self.provider == "gemini"
             or self.provider == "auto"
         ):
+
             try:
                 import google.generativeai as genai
 
@@ -138,7 +373,9 @@ class LLMGenerator:
                     system_instruction=PromptBuilder.SYSTEM_PROMPT
                 )
 
-                response = model.generate_content(prompt)
+                response = model.generate_content(
+                    prompt
+                )
 
                 answer_text = (
                     response.text.strip()
@@ -154,19 +391,21 @@ class LLMGenerator:
                 }
 
             except Exception as e:
+
                 print(
                     f"[LLMGenerator] Gemini error: {e}. "
                     f"Falling back..."
                 )
 
         # -----------------------------------------------------
-        # 5. OpenAI
+        # 6. OpenAI
         # -----------------------------------------------------
 
         if self.openai_key and (
             self.provider == "openai"
             or self.provider == "auto"
         ):
+
             try:
                 from openai import AsyncOpenAI
 
@@ -203,13 +442,14 @@ class LLMGenerator:
                 }
 
             except Exception as e:
+
                 print(
                     f"[LLMGenerator] OpenAI error: {e}. "
                     f"Falling back..."
                 )
 
         # -----------------------------------------------------
-        # 6. Local grounded synthesis
+        # 7. Local grounded synthesis
         # -----------------------------------------------------
 
         local_answer = self._local_grounded_synthesis(
@@ -243,6 +483,7 @@ class LLMGenerator:
         # -----------------------------------------------------
 
         if not retrieved_chunks:
+
             yield {
                 "type": "token",
                 "content": PromptBuilder.FALLBACK_UNKNOWN_MESSAGE
@@ -260,10 +501,16 @@ class LLMGenerator:
             return
 
         # -----------------------------------------------------
-        # 2. Grounding gate
+        # 2. Final relevance filtering
         # -----------------------------------------------------
 
-        if not self._is_grounded(retrieved_chunks):
+        relevant_chunks = self._filter_relevant_chunks(
+            query,
+            retrieved_chunks
+        )
+
+        if not relevant_chunks:
+
             yield {
                 "type": "token",
                 "content": PromptBuilder.FALLBACK_UNKNOWN_MESSAGE
@@ -271,9 +518,35 @@ class LLMGenerator:
 
             yield {
                 "type": "sources",
-                "sources": self._format_sources(
-                    retrieved_chunks
-                )
+                "sources": []
+            }
+
+            yield {
+                "type": "done"
+            }
+
+            return
+
+        # IMPORTANT:
+        # Only filtered chunks continue through the pipeline.
+        retrieved_chunks = relevant_chunks
+
+        # -----------------------------------------------------
+        # 3. Grounding gate
+        # -----------------------------------------------------
+
+        if not self._is_grounded(
+            retrieved_chunks
+        ):
+
+            yield {
+                "type": "token",
+                "content": PromptBuilder.FALLBACK_UNKNOWN_MESSAGE
+            }
+
+            yield {
+                "type": "sources",
+                "sources": []
             }
 
             yield {
@@ -283,7 +556,7 @@ class LLMGenerator:
             return
 
         # -----------------------------------------------------
-        # 3. Prepare grounded request
+        # 4. Prepare grounded request
         # -----------------------------------------------------
 
         sources = self._format_sources(
@@ -297,13 +570,14 @@ class LLMGenerator:
         )
 
         # -----------------------------------------------------
-        # 4. Gemini streaming
+        # 5. Gemini streaming
         # -----------------------------------------------------
 
         if self.gemini_key and (
             self.provider == "gemini"
             or self.provider == "auto"
         ):
+
             try:
                 import google.generativeai as genai
 
@@ -322,7 +596,9 @@ class LLMGenerator:
                 )
 
                 for chunk in response:
+
                     if chunk.text:
+
                         yield {
                             "type": "token",
                             "content": chunk.text
@@ -340,13 +616,14 @@ class LLMGenerator:
                 return
 
             except Exception as e:
+
                 print(
                     f"[LLMGenerator] Gemini streaming error: "
                     f"{e}. Falling back..."
                 )
 
         # -----------------------------------------------------
-        # 5. Local streaming fallback
+        # 6. Local streaming fallback
         # -----------------------------------------------------
 
         full_res = await self.generate_answer(
@@ -355,11 +632,15 @@ class LLMGenerator:
             conversation_history
         )
 
-        answer = full_res.get("answer", "")
+        answer = full_res.get(
+            "answer",
+            ""
+        )
 
         words = answer.split(" ")
 
         for i, word in enumerate(words):
+
             token = word
 
             if i < len(words) - 1:
@@ -405,6 +686,7 @@ class LLMGenerator:
 
         best_sentences = []
 
+        # Only inspect already-filtered chunks.
         for chunk in chunks[:3]:
 
             content = chunk.get(
@@ -442,6 +724,7 @@ class LLMGenerator:
                 )
 
                 if matches > 0:
+
                     best_sentences.append(
                         (
                             matches,
@@ -492,7 +775,9 @@ class LLMGenerator:
         for line in top_lines:
 
             if line not in seen:
+
                 seen.add(line)
+
                 deduped.append(line)
 
         formatted_lines = []
@@ -534,6 +819,9 @@ class LLMGenerator:
         self,
         chunks: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
+        """
+        Formats ONLY the already-filtered chunks as citations.
+        """
 
         sources = []
         seen = set()
@@ -555,48 +843,50 @@ class LLMGenerator:
                 ""
             )
 
-            sources.append({
-                "documentId": chunk.get(
-                    "document_id"
-                ),
+            sources.append(
+                {
+                    "documentId": chunk.get(
+                        "document_id"
+                    ),
 
-                "documentName": (
-                    chunk.get("document_name")
-                    or chunk.get("filename")
-                ),
+                    "documentName": (
+                        chunk.get("document_name")
+                        or chunk.get("filename")
+                    ),
 
-                "filename": chunk.get(
-                    "filename"
-                ),
+                    "filename": chunk.get(
+                        "filename"
+                    ),
 
-                "page": chunk.get(
-                    "page_number",
-                    1
-                ),
+                    "page": chunk.get(
+                        "page_number",
+                        1
+                    ),
 
-                "similarityScore": chunk.get(
-                    "similarity_score",
-                    0.0
-                ),
+                    "similarityScore": chunk.get(
+                        "similarity_score",
+                        0.0
+                    ),
 
-                "category": chunk.get(
-                    "category",
-                    "General"
-                ),
+                    "category": chunk.get(
+                        "category",
+                        "General"
+                    ),
 
-                "department": chunk.get(
-                    "department",
-                    "All"
-                ),
+                    "department": chunk.get(
+                        "department",
+                        "All"
+                    ),
 
-                "snippet": (
-                    content[:180]
-                    + (
-                        "..."
-                        if len(content) > 180
-                        else ""
+                    "snippet": (
+                        content[:180]
+                        + (
+                            "..."
+                            if len(content) > 180
+                            else ""
+                        )
                     )
-                )
-            })
+                }
+            )
 
         return sources
