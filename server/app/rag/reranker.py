@@ -1,36 +1,36 @@
 import re
-
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from app.rag.embeddings import STOPWORDS
 
 
 class HybridReranker:
     """
-    Final relevance reranker.
+    Hybrid reranker for retrieved document chunks.
 
-    Combines:
-    - semantic similarity
-    - keyword overlap
-    - important-term overlap
-    - document title relevance
-    - exact phrase relevance
+    Ranking is based on:
+    1. Semantic similarity
+    2. Keyword relevance
+    3. Document title relevance
+
+    The retriever provides a larger candidate pool.
+    This class produces the final Top-K results.
     """
 
     @staticmethod
     def rerank(
         query: str,
         retrieved_chunks: List[Dict[str, Any]],
-        semantic_weight: float = 0.60,
-        keyword_weight: float = 0.25,
-        important_weight: float = 0.15
+        final_k: Optional[int] = None,
+        semantic_weight: float = 0.7,
+        keyword_weight: float = 0.3
     ) -> List[Dict[str, Any]]:
 
         if not retrieved_chunks:
             return []
 
         # ---------------------------------------------------------
-        # Query terms
+        # 1. Extract meaningful query terms
         # ---------------------------------------------------------
 
         query_terms = {
@@ -43,27 +43,19 @@ class HybridReranker:
             and term not in STOPWORDS
         }
 
-        important_terms = {
-            term
-            for term in query_terms
-            if term not in {
-                "what",
-                "which",
-                "when",
-                "where",
-                "how",
-                "does",
-                "do",
-                "are",
-                "is",
-                "the",
-                "for",
-                "from",
-                "with"
-            }
-        }
+        # If there are no meaningful query terms,
+        # return the original candidate pool.
+        if not query_terms:
+            if final_k is not None:
+                return retrieved_chunks[:final_k]
+
+            return retrieved_chunks
 
         reranked = []
+
+        # ---------------------------------------------------------
+        # 2. Score every candidate
+        # ---------------------------------------------------------
 
         for item in retrieved_chunks:
 
@@ -75,6 +67,7 @@ class HybridReranker:
                 item.get("document_name") or ""
             ).lower()
 
+            # Tokenize document content
             content_terms = set(
                 re.findall(
                     r"\b\w+\b",
@@ -82,6 +75,7 @@ class HybridReranker:
                 )
             )
 
+            # Tokenize document title
             title_terms = set(
                 re.findall(
                     r"\b\w+\b",
@@ -90,20 +84,25 @@ class HybridReranker:
             )
 
             # -----------------------------------------------------
-            # Keyword relevance
+            # Content keyword relevance
             # -----------------------------------------------------
 
             content_matches = (
                 query_terms & content_terms
             )
 
+            # -----------------------------------------------------
+            # Document title relevance
+            # -----------------------------------------------------
+
             title_matches = (
                 query_terms & title_terms
             )
 
+            # Give document title matches additional importance.
             keyword_score = (
                 len(content_matches)
-                + 1.5 * len(title_matches)
+                + (1.5 * len(title_matches))
             ) / max(
                 len(query_terms),
                 1
@@ -115,23 +114,7 @@ class HybridReranker:
             )
 
             # -----------------------------------------------------
-            # Important-term relevance
-            # -----------------------------------------------------
-
-            important_matches = (
-                important_terms & content_terms
-            )
-
-            important_score = (
-                len(important_matches)
-                / max(
-                    len(important_terms),
-                    1
-                )
-            )
-
-            # -----------------------------------------------------
-            # Semantic score
+            # Semantic similarity
             # -----------------------------------------------------
 
             semantic_score = float(
@@ -145,28 +128,15 @@ class HybridReranker:
             )
 
             # -----------------------------------------------------
-            # Final score
+            # Final hybrid score
             # -----------------------------------------------------
 
             hybrid_score = (
                 semantic_weight * semantic_score
                 + keyword_weight * keyword_score
-                + important_weight * important_score
             )
 
-            # -----------------------------------------------------
-            # Penalize weak lexical relevance
-            #
-            # Prevents chunks such as fee/refund information
-            # from ranking highly for document-verification queries.
-            # -----------------------------------------------------
-
-            if (
-                important_terms
-                and len(important_matches) == 0
-            ):
-                hybrid_score *= 0.65
-
+            # Copy original item so we don't modify it directly.
             updated_item = dict(item)
 
             updated_item["hybrid_score"] = round(
@@ -179,11 +149,6 @@ class HybridReranker:
                 4
             )
 
-            updated_item["important_score"] = round(
-                important_score,
-                4
-            )
-
             updated_item["content_matches"] = len(
                 content_matches
             )
@@ -192,14 +157,10 @@ class HybridReranker:
                 title_matches
             )
 
-            updated_item["important_matches"] = len(
-                important_matches
-            )
-
             reranked.append(updated_item)
 
         # ---------------------------------------------------------
-        # Sort
+        # 3. Sort by hybrid score
         # ---------------------------------------------------------
 
         reranked.sort(
@@ -208,10 +169,10 @@ class HybridReranker:
         )
 
         # ---------------------------------------------------------
-        # IMPORTANT:
-        # Return only final Top-K
+        # 4. Return final Top-K
         # ---------------------------------------------------------
 
-        final_k = 5
+        if final_k is not None:
+            return reranked[:final_k]
 
-        return reranked[:final_k]
+        return reranked
