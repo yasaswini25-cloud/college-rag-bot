@@ -1,86 +1,102 @@
 # 🎓 AI-Powered College Information Assistant
 
-An AI-powered college information assistant built using **Retrieval-Augmented Generation (RAG)**. The system allows students to ask questions about college-related information such as admissions, academics, hostel facilities, fees, placements, scholarships, library rules, and regulations.
+## 1. Project Name
 
-Instead of relying only on the LLM's general knowledge, the application retrieves relevant information from the college's document knowledge base and uses it to generate grounded responses.
+**AI-Powered College Information Assistant**
+
+A full-stack AI chatbot that uses Retrieval-Augmented Generation (RAG) to answer college-related questions using information from institutional documents.
 
 ---
 
-## 🚀 Live Demo
+## 2. Problem Statement
+
+Students often need to search through multiple college documents to find information about admissions, academics, hostel facilities, fees, placements, scholarships, and library policies. This project solves this problem by providing a single AI-powered assistant where users can ask questions in natural language and receive answers based on relevant college documents.
+
+The system retrieves relevant information from the college knowledge base before generating an answer, helping provide more relevant and grounded responses.
+
+---
+
+## 3. Features
+
+### Core Features
+
+- 🤖 AI-powered college information chatbot
+- 🔎 Retrieval-Augmented Generation (RAG)
+- 📚 College document knowledge base
+- 🧩 Document chunking and processing
+- 🧠 Embedding-based semantic retrieval
+- 🔤 Keyword-based retrieval
+- ⚡ Hybrid document retrieval
+- 📊 Document reranking
+- 💬 Conversation history
+- 🗂️ Multiple conversations
+- ✏️ Rename conversations
+- 🗑️ Delete conversations
+- 🔐 JWT-based authentication
+- 👤 User registration and login
+- 👨‍💼 Student and Admin roles
+- 📄 Document upload
+- 📑 Support for PDF, DOCX, DOC, TXT and Markdown files
+- 🔄 Document reindexing
+- 📈 Admin dashboard and analytics
+- 💬 User feedback system
+- ❤️ Backend health monitoring
+
+### RAG Features
+
+- Semantic similarity search
+- Keyword matching
+- Document title relevance
+- Hybrid scoring
+- Candidate retrieval
+- Reranking
+- Configurable Top-K retrieval
+- Configurable similarity threshold
+
+---
+
+## 4. Technology Stack
 
 ### Frontend
-https://client-51czj1nt8-yasaswini25-clouds-projects.vercel.app/
 
-### Backend API
-https://college-rag-bot-akne.onrender.com/
+- React
+- Vite
+- JavaScript
+- Axios
+- CSS
 
-### API Documentation
-https://college-rag-bot-akne.onrender.com/docs
+### Backend
 
----
+- Python
+- FastAPI
+- Uvicorn
+- SQLAlchemy
+- Pydantic
+- Pydantic Settings
 
-## 📌 Project Overview
+### Database
 
-The **AI-Powered College Information Assistant** is a full-stack RAG-based chatbot designed to provide accurate and context-aware answers to college-related questions.
+- SQLite
+- SQLAlchemy Async ORM
+- aiosqlite
 
-Users can ask natural-language questions such as:
+### AI / RAG
 
-- "What are the hostel room charges?"
-- "What is the hostel curfew timing?"
-- "What are the admission requirements?"
-- "What are the placement eligibility rules?"
-- "What scholarships are available?"
-- "What are the library timings?"
-- "What are the academic regulations?"
+- Google Gemini API
+- LLM-based response generation
+- Embeddings
+- Cosine similarity
+- Hybrid retrieval
+- Keyword matching
+- Reranking
 
-The system retrieves relevant document chunks from the knowledge base and provides the retrieved context to the language model before generating the final answer.
+### Authentication
 
----
+- JWT
+- Password hashing
+- Role-based access control
 
-## ✨ Features
-
-### 🤖 AI Chatbot
-
-- Natural-language question answering
-- Context-aware responses
-- RAG-based knowledge retrieval
-- Grounded responses using college documents
-- Conversation history
-- Multiple conversations
-- Conversation renaming
-- Conversation deletion
-
-### 📚 Knowledge Base
-
-The system supports college documents containing information about:
-
-- Admissions
-- Academic regulations
-- Hostel and residence fees
-- Hostel regulations
-- Placements
-- Scholarships
-- Library policies
-- College guidelines
-
-### 🔎 RAG Pipeline
-
-The retrieval pipeline includes:
-
-1. Document ingestion
-2. Document processing
-3. Text extraction
-4. Text chunking
-5. Embedding generation
-6. Vector-based retrieval
-7. Keyword matching
-8. Hybrid retrieval
-9. Reranking
-10. LLM response generation
-
-### 📄 Document Processing
-
-Supported file formats:
+### Document Processing
 
 - PDF
 - DOCX
@@ -88,84 +104,16 @@ Supported file formats:
 - TXT
 - Markdown
 
-### 🔐 Authentication
+### Deployment
 
-The application provides:
+- Vercel — Frontend
+- Render — Backend
 
-- User registration
-- User login
-- JWT authentication
-- Logout
-- Current-user information
-- Role-based users
+---
 
-### 👥 User Roles
+## 5. Screenshots
 
-The system supports different user roles including:
-
-- Student
-- Administrator
-
-### 📊 Admin Features
-
-Administrators can access:
-
-- Dashboard
-- Document management
-- RAG status
-- Document reindexing
-- Analytics
-
-### 💬 Feedback
-
-Users can provide feedback on chatbot responses.
+### bot
 
 
-# 🏗️ System Architecture
-
-                         ┌──────────────────────┐
-                         │      User / Student  │
-                         └──────────┬───────────┘
-                                    │
-                                    ▼
-                         ┌──────────────────────┐
-                         │   React Frontend     │
-                         │      + Vite          │
-                         └──────────┬───────────┘
-                                    │
-                                    │ REST API
-                                    ▼
-                    ┌─────────────────────────────┐
-                    │        FastAPI Backend      │
-                    │                             │
-                    │ Authentication              │
-                    │ Chat                        │
-                    │ Documents                   │
-                    │ RAG                         │
-                    │ Admin                       │
-                    │ Feedback                    │
-                    └─────────────┬───────────────┘
-                                  │
-                     ┌────────────┴─────────────┐
-                     │                          │
-                     ▼                          ▼
-             ┌───────────────┐          ┌────────────────┐
-             │   Database    │          │   RAG Pipeline │
-             │               │          │                │
-             │ Users         │          │ Chunking       │
-             │ Documents     │          │ Embeddings     │
-             │ Chunks        │          │ Retrieval      │
-             │ Conversations │          │ Reranking      │
-             │ Messages      │          └───────┬────────┘
-             └───────────────┘                  │
-                                                ▼
-                                      ┌──────────────────┐
-                                      │ Knowledge Base   │
-                                      │ College Docs     │
-                                      └────────┬─────────┘
-                                               │
-                                               ▼
-                                      ┌──────────────────┐
-                                      │       LLM        │
-                                      │ Gemini / OpenAI  │
-                                      └──────────────────┘
+![Login Page]<img width="1832" height="851" alt="image" src="https://github.com/user-attachments/assets/67276441-87da-4f89-aa8d-5c7575759e2d" />
