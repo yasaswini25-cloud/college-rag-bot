@@ -116,4 +116,4 @@ The system retrieves relevant information from the college knowledge base before
 ### bot
 
 
-![Login Page]<img width="1832" height="851" alt="image" src="https://github.com/user-attachments/assets/67276441-87da-4f89-aa8d-5c7575759e2d" />
+<img width="1832" height="851" alt="image" src="https://github.com/user-attachments/assets/67276441-87da-4f89-aa8d-5c7575759e2d" />
